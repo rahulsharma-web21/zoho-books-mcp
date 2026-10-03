@@ -67,6 +67,12 @@ export function buildTools(endpoints: Endpoint[]) {
         if (!SAFE_SEGMENT.test(value)) throw new Error(`Invalid value for ${p}`);
         path = path.replace(`{${p}}`, value);
       }
+      // A misspelt argument must fail loudly: ignoring it would quietly answer from the default company.
+      const known = new Set([...placeholders, ...allowed, ...(orgScoped ? ["organization", "organization_id"] : [])]);
+      const unknown = Object.keys(args).filter((k) => !known.has(k));
+      if (unknown.length) {
+        throw new Error(`Unknown argument(s): ${unknown.join(", ")}. Accepted: ${[...known].join(", ") || "none"}`);
+      }
       const query: Record<string, string | number | undefined> = { ...ep.fixed };
       for (const [k, v] of Object.entries(args)) {
         if (allowed.has(k) && v !== undefined && v !== "") query[k] = v;
@@ -75,7 +81,7 @@ export function buildTools(endpoints: Endpoint[]) {
         if (query.from_date || query.to_date) query.filter_by = "TransactionDate.CustomDate";
         else query.filter_by = ep.defaultPeriod ?? "TransactionDate.ThisMonth";
       }
-      return zohoBooksGet(path, query, orgScoped ? args.organization : undefined);
+      return zohoBooksGet(path, query, orgScoped ? args.organization ?? args.organization_id : undefined);
     };
   }
 
