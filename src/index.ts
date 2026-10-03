@@ -52,9 +52,9 @@ async function main() {
     return;
   }
 
-  // HTTP mode (e.g. Render): exposes financial data, so a bearer token is mandatory.
+  // HTTP mode (e.g. Render). The bearer token is optional: if MCP_AUTH_TOKEN is unset, the endpoint is open.
   const token = process.env.MCP_AUTH_TOKEN;
-  if (!token) throw new Error("MCP_AUTH_TOKEN must be set when PORT is set");
+  if (!token) console.error("WARNING: MCP_AUTH_TOKEN not set - /mcp is unauthenticated");
 
   createHttpServer(async (req, res) => {
     const path = (req.url ?? "").split("?")[0];
@@ -66,7 +66,7 @@ async function main() {
       res.writeHead(404).end();
       return;
     }
-    if (!authorized(req.headers.authorization, token)) {
+    if (token && !authorized(req.headers.authorization, token)) {
       res.writeHead(401).end("Unauthorized");
       return;
     }
