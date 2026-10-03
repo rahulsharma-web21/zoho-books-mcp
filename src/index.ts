@@ -3,6 +3,11 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { createServer as createHttpServer } from "node:http";
 import { timingSafeEqual } from "node:crypto";
+import express from "express";
+import { mcpAuthRouter } from "@modelcontextprotocol/sdk/server/auth/router.js";
+import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
+import { createProvider } from "./oauth.js";
+import { zohoUser } from "./zoho.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 
 import { buildTools } from "./tools/registry.js";
@@ -45,10 +50,52 @@ function authorized(header: string | undefined, token: string): boolean {
   return given.length === want.length && timingSafeEqual(given, want);
 }
 
+// Hosted mode with per-user Zoho sign-in. Needs ZOHO_OAUTH_CLIENT_ID/SECRET (a server-based Zoho app).
+function startOAuthServer(port: number) {
+  const base = process.env.PUBLIC_URL ?? process.env.RENDER_EXTERNAL_URL;
+  if (!base) throw new Error("Set PUBLIC_URL to this server's public https URL");
+  const publicUrl = base.replace(/\/$/, "");
+  const provider = createProvider(publicUrl);
+  const app = express();
+  app.set("trust proxy", 1);
+
+  app.get("/health", (_req, res) => void res.send("ok"));
+  app.use(mcpAuthRouter({ provider, issuerUrl: new URL(publicUrl), resourceServerUrl: new URL(`${publicUrl}/mcp`) }));
+  app.get("/oauth/zoho/callback", (req, res) => void provider.callback(req, res));
+
+  app.post(
+    "/mcp",
+    requireBearerAuth({ verifier: provider, resourceMetadataUrl: `${publicUrl}/.well-known/oauth-protected-resource/mcp` }),
+    express.json({ limit: "4mb" }),
+    async (req, res) => {
+      // Stateless: a fresh server + transport per request, running as the signed-in Zoho user.
+      const server = buildServer();
+      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+      res.on("close", () => {
+        transport.close();
+        server.close();
+      });
+      const refreshToken = (req as any).auth.extra.zrt as string;
+      await zohoUser.run({ refreshToken }, async () => {
+        await server.connect(transport);
+        await transport.handleRequest(req, res, req.body);
+      });
+    }
+  );
+  app.all("/mcp", (_req, res) => void res.status(405).set("Allow", "POST").end());
+
+  app.listen(port, "0.0.0.0", () => console.error(`Listening on ${port} (Zoho OAuth sign-in)`));
+}
+
 async function main() {
   const port = process.env.PORT;
   if (!port) {
     await buildServer().connect(new StdioServerTransport());
+    return;
+  }
+
+  if (process.env.ZOHO_OAUTH_CLIENT_ID) {
+    startOAuthServer(Number(port));
     return;
   }
 

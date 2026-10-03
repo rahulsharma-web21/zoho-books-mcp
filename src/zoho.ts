@@ -1,4 +1,5 @@
 import dotenv from "dotenv";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { assertAccountsHost, assertApiHost, assertBooksReadOnlyScopes } from "./hosts.js";
@@ -20,16 +21,31 @@ function requireEnv(name: string, value: string | undefined): string {
   return value;
 }
 
-let cachedAccessToken: { token: string; expiresAt: number } | null = null;
+/** Set per request in hosted OAuth mode: the signed-in user's own Zoho refresh token. */
+export const zohoUser = new AsyncLocalStorage<{ refreshToken: string }>();
+
+/** The app credentials: the server-based app in OAuth mode, otherwise the Self Client. */
+export function zohoAppCredentials(): { clientId: string; clientSecret: string } {
+  if (process.env.ZOHO_OAUTH_CLIENT_ID) {
+    return {
+      clientId: process.env.ZOHO_OAUTH_CLIENT_ID,
+      clientSecret: requireEnv("ZOHO_OAUTH_CLIENT_SECRET", process.env.ZOHO_OAUTH_CLIENT_SECRET),
+    };
+  }
+  return {
+    clientId: requireEnv("ZOHO_CLIENT_ID", ZOHO_CLIENT_ID),
+    clientSecret: requireEnv("ZOHO_CLIENT_SECRET", ZOHO_CLIENT_SECRET),
+  };
+}
+
+const accessTokens = new Map<string, { token: string; expiresAt: number }>();
 
 async function getAccessToken(): Promise<string> {
-  if (cachedAccessToken && cachedAccessToken.expiresAt > Date.now() + 30_000) {
-    return cachedAccessToken.token;
-  }
+  const refreshToken = zohoUser.getStore()?.refreshToken ?? requireEnv("ZOHO_REFRESH_TOKEN", ZOHO_REFRESH_TOKEN);
+  const cached = accessTokens.get(refreshToken);
+  if (cached && cached.expiresAt > Date.now() + 30_000) return cached.token;
 
-  const clientId = requireEnv("ZOHO_CLIENT_ID", ZOHO_CLIENT_ID);
-  const clientSecret = requireEnv("ZOHO_CLIENT_SECRET", ZOHO_CLIENT_SECRET);
-  const refreshToken = requireEnv("ZOHO_REFRESH_TOKEN", ZOHO_REFRESH_TOKEN);
+  const { clientId, clientSecret } = zohoAppCredentials();
 
   const url = new URL(`https://${assertAccountsHost(ZOHO_ACCOUNTS_DOMAIN)}/oauth/v2/token`);
   url.searchParams.set("refresh_token", refreshToken);
@@ -46,11 +62,9 @@ async function getAccessToken(): Promise<string> {
   assertBooksReadOnlyScopes(body.scope);
   if (!body.scope) console.error("Zoho did not report this token's scopes, so they could not be checked as Books READ-only.");
 
-  cachedAccessToken = {
-    token: body.access_token,
-    expiresAt: Date.now() + (body.expires_in ?? 3600) * 1000,
-  };
-  return cachedAccessToken.token;
+  const entry = { token: body.access_token, expiresAt: Date.now() + (body.expires_in ?? 3600) * 1000 };
+  accessTokens.set(refreshToken, entry);
+  return entry.token;
 }
 
 // ---- organizations -------------------------------------------------------------------------
@@ -63,9 +77,11 @@ const ALLOWED_ORG_IDS = new Set(
 );
 
 type Org = { organization_id: string; name: string };
-let orgCache: { orgs: Org[]; at: number } | null = null;
+const orgCaches = new Map<string, { orgs: Org[]; at: number }>();
 
 async function accessibleOrganizations(): Promise<Org[]> {
+  const cacheKey = zohoUser.getStore()?.refreshToken ?? "";
+  let orgCache = orgCaches.get(cacheKey);
   if (!orgCache || Date.now() - orgCache.at > 10 * 60_000) {
     const body = await request("/organizations", {}, undefined);
     const orgs: Org[] = (body.organizations ?? []).map((o: any) => ({
@@ -73,6 +89,7 @@ async function accessibleOrganizations(): Promise<Org[]> {
       name: String(o.name ?? "").trim(),
     }));
     orgCache = { orgs, at: Date.now() };
+    orgCaches.set(cacheKey, orgCache);
   }
   return ALLOWED_ORG_IDS.size ? orgCache.orgs.filter((o) => ALLOWED_ORG_IDS.has(o.organization_id)) : orgCache.orgs;
 }
