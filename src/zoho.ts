@@ -98,7 +98,10 @@ const describeOrgs = (orgs: Org[]) => orgs.map((o) => `${o.name} (${o.organizati
 
 async function resolveOrganization(choice?: string): Promise<Org> {
   const orgs = await accessibleOrganizations();
-  const wanted = (choice ?? ZOHO_ORG_ID ?? "").trim();
+  // The ZOHO_ORG_ID default belongs to the shared Self Client login only. A signed-in user gets their own
+  // organizations: the only one, or the one they name.
+  const fallback = zohoUser.getStore() ? (orgs.length === 1 ? orgs[0].organization_id : "") : ZOHO_ORG_ID;
+  const wanted = (choice ?? fallback ?? "").trim();
   if (!wanted) {
     throw new Error(`Say which organization to use: pass "organization" (a name or an id). Available: ${describeOrgs(orgs)}`);
   }
