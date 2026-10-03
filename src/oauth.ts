@@ -4,6 +4,7 @@ import type { OAuthServerProvider, AuthorizationParams } from "@modelcontextprot
 import type { OAuthRegisteredClientsStore } from "@modelcontextprotocol/sdk/server/auth/clients.js";
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import type { OAuthClientInformationFull, OAuthTokens } from "@modelcontextprotocol/sdk/shared/auth.js";
+import { InvalidTokenError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
 import { assertAccountsHost, disallowedScopes } from "./hosts.js";
 import { zohoAppCredentials, zohoBooksGet, zohoUser } from "./zoho.js";
 
@@ -156,7 +157,12 @@ export function createProvider(publicUrl: string): OAuthServerProvider & { callb
     },
 
     async verifyAccessToken(token): Promise<AuthInfo> {
-      const data = open("access", token);
+      let data;
+      try {
+        data = open("access", token);
+      } catch {
+        throw new InvalidTokenError("Invalid or expired access token");
+      }
       return { token, clientId: data.cid, scopes: [], expiresAt: Math.floor(data.exp / 1000), extra: { zrt: data.zrt } };
     },
   };
